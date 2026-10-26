@@ -1,48 +1,145 @@
-# Design notes
+# Design
 
-## Q1. Every wait
+Two copies of this service run against one Postgres. They share nothing else.
+The rule for every write path is the same: lock the rows, check, change, write
+the ledger, commit. No HTTP call ever happens inside a transaction.
 
-1. **Postgres row locks** (`select … for update`). Transfer and reversal lock both wallet rows in id order; payout acceptance locks one wallet; `finish` locks the payout row, then its wallet; freeze locks the wallet. A waiter waits until the holder commits. No transaction does I/O while holding a lock (bank calls run outside transactions), so a hold is a few statements, single-digit ms. Postgres grants row locks FIFO, so a waiter sits behind at most 2 instances × 10 pool connections. Measured: freeze/unfreeze max 465 ms with 40 clients on the same three wallets. No `lock_timeout` is set.
-2. **Idempotency-Key primary key.** A concurrent duplicate blocks on the PK insert until the first request commits, then fails and replays. Bounded by one transaction.
-3. **Hikari pool.** 10 connections per instance, `connection-timeout` 2000 ms, then the request fails. Tomcat has 50 threads, so up to 40 can wait on the pool.
-4. **Tomcat.** Beyond 50 busy threads requests sit in the accept backlog (100), bounded only by the client's timeout.
-5. **Bank HTTP.** Connect 1 s, read 5 s, only on the worker thread, never on a request thread. The worker is one scheduler thread (fixed delay 1 s) handling up to 50 submits and 50 polls per run, so a bank that hangs on every call costs up to 100 × 6 s per run. The first poll waits 5 s after submit; retries back off from 2 s doubling to 30 s.
-6. **Liquibase changelog lock.** The second instance waits at startup until the first has migrated.
-7. **Callback handler.** Only waits on item 1, which keeps it inside the bank's 2 s deadline.
+## Tables
 
-## Q2. Database restart
+- `wallet` - id, status, balance, reserved. available = balance - reserved, computed on read.
+  A check constraint keeps reserved >= 0 and balance >= reserved, so available can't go negative.
+- `transfer` - one row per transfer, COMPLETED or REVERSED.
+- `wallet_payout` - one row per payout. Public status (PENDING / SUCCEEDED / FAILED)
+  plus an internal state (ACCEPTED / SUBMITTED / DONE) and retry fields.
+- `bank_event` - one row per callback event_id. The primary key is the dedup.
+- `idempotency_key` - key, request hash, stored response.
+- `ledger_entry` - double entry legs.
 
-Acceptance is one transaction: `wallet.reserved += amount`, a `wallet_payout` row (state ACCEPTED, status PENDING) and the idempotency record. All three exist or none do.
+Liquibase owns the schema. Hibernate only validates it.
 
-1. **Restart before that commit.** Nothing persisted, client gets 500, no money moved. A retry with the same `Idempotency-Key` creates the payout fresh.
-2. **Restart after commit, before the worker claims the row.** Row and reservation are durable. Once Postgres is back, Hikari re-validates connections and the next worker run claims the row (`locked_until` null) and submits to the bank. Available stays reduced throughout; balance is untouched.
-3. **Restart while the bank call is in flight.** The claim (`locked_until = now + 30 s`) is committed. The bank may answer ACCEPTED, but our `submitted()` transaction fails. The row stays ACCEPTED; after 30 s any instance re-claims and submits again. The bank is idempotent on `payout_id` and returns the same ACCEPTED and `bank_ref`, so it never pays twice. A bank error or timeout never marks a payout FAILED.
-4. **Restart while the callback arrives.** The `bank_event` insert fails, we answer 500, the bank retries every 3 s up to 5 times. Independently the worker polls `GET /bank/payouts/{id}` 5 s after submit. Whichever signal lands first runs `finish`: lock the payout row, lock the wallet, then in one transaction capture (balance and reserved minus amount) or release (reserved minus amount) and set DONE. A later signal sees DONE and only sets `conflict` if its status differs.
-5. **Restart during `finish`.** Rolled back and repeated later; the DONE check makes it idempotent. The CHECK constraint `reserved >= 0 and balance >= reserved` is the last line of defence.
+## How each write works
 
-## Q3. What you left out
+**Transfer.** One transaction. Lock both wallets (lower id first, so A->B and B->A
+can't deadlock), check active and funds on the locked rows, debit, credit, write
+two ledger legs, commit. Nobody can see the debit without the credit.
 
-- **Automated tests.** None. Verification was scripted: a curl pass over every endpoint and error code; 600 concurrent transfers over both instances with freeze/unfreeze interleaved (sum of balances conserved, no negative available, zero 5xx); ten simultaneous requests with one key (one transfer); five concurrent copies of one callback (handled once); killing the accepting instance after three payouts (the other finished them within 10 s). I would turn these into JUnit with Testcontainers Postgres and a WireMock bank. The hard part is the timing language ("callback can arrive before submit returns", "final within 2 minutes"): it needs a test profile with a 100 ms worker interval and an injected clock.
-- **Latency targets.** p95 300 ms for 5.1 and 202 within 500 ms were observed, not measured under the spec's load: p95 was 915 ms with 40 clients on three wallets, which is lock contention by construction. I would run k6 against a realistic wallet spread.
-- **Wallet creation API.** None; wallets come from a Liquibase seed.
-- **Two-minute finality when the bank is unreachable.** A payout stays PENDING until the bank answers. Marking it FAILED blind could pay a payout we reported FAILED, which the spec forbids, so the two clauses conflict when the bank is down for two minutes.
-- **Dead-letter handling and alerting** for exhausted retries.
+**Reversal.** Lock the transfer row first, then the wallets in id order. Second
+caller waits, sees REVERSED, gets 409. The debited side must be active with
+funds. The credited side may be frozen.
 
-## Decisions the paper left open
+**Freeze.** Takes the same wallet row lock a debit takes. It waits for debits
+already running, and every debit after it sees FROZEN. Works across both
+instances with nothing extra. Same status again is a no-op with 200.
 
-- Error body is `{"error": CODE, "message": …}`; unknown wallet, transfer or payout is 404.
-- `Idempotency-Key` reused with a different body is 422 `IDEMPOTENCY_KEY_REUSED`. Keys are global and kept forever.
-- Reversal takes no `Idempotency-Key`: the transfer row lock plus the status check turns any second attempt into 409.
-- Amounts are integers in minor units; ids are a prefix plus six hex characters.
-- Bank REJECTED counts as FAILED. Bank NOT_FOUND after our submit means re-submit, since the bank is idempotent on our id.
-- `conflict` means a later bank signal contradicted the recorded final status.
-- Setting a wallet to its current status returns the previous `changed_at`.
-- The bank's `payout_id` is our own payout id, so the bank's idempotency is our double-payment guard.
+**Payout accept.** Lock wallet, check, reserved += amount, insert row, commit, 202.
+No bank call here.
 
-## Isolation level
+**Payout worker.** Runs on both instances every 500 ms. Claims due rows with
+`FOR UPDATE SKIP LOCKED` and a 30 s lease, then hands them to a pool of 8 bank
+threads. ACCEPTED rows get submitted; SUBMITTED rows get polled if no callback
+came. If the instance dies, the lease runs out and the other instance picks the
+row up.
 
-READ COMMITTED, the Postgres default. Correctness comes from explicit row locks: every balance change happens after `select … for update` on the wallet rows, taken in id order, and values are read after the lock, so there are no lost updates and no deadlocks. `GET /wallets/{id}` is a single-row read, so balance, reserved and available always come from one committed version. The CHECK constraint backs the invariant at the database.
+**Callback.** Insert event_id into `bank_event`. Duplicate -> 200, nothing else.
+First copy runs `finish`.
 
-## Idempotency mechanism
+**finish** is the only place reserved money leaves or returns. Lock payout, lock
+wallet. Already DONE -> do nothing, set `conflict` if the new answer differs.
+SUCCEEDED -> balance -= amount, reserved -= amount, ledger legs. FAILED ->
+reserved -= amount.
 
-Table `idempotency_key(key PK, endpoint, request_hash, status_code, response_body)`. On a request: look the key up; same endpoint and same SHA-256 of the body replays the stored status and body; a different hash is 422. Otherwise the action runs and the record is inserted in the same transaction, as a real INSERT (`Persistable.isNew()`), so a concurrent duplicate blocks on the primary key, fails when the first commits, rolls back its own transfer or reservation and replays the winner's response. Failed actions store nothing, so a client may retry with the same key.
+Lock order everywhere: payout or transfer row first, then wallets by id.
+
+## Ledger
+
+Every balance change writes a debit leg and a credit leg of the same amount in the
+same transaction. Transfers go wallet to wallet. A payout debits the wallet and
+credits `SYS:BANK`. Opening balances come from `SYS:OPENING`. Reservations are not
+ledger entries, they don't change balance.
+
+Two checks that must always return nothing:
+
+```sql
+select source_type, source_id from ledger_entry group by 1,2
+having sum(case when entry_type='DEBIT' then amount else -amount end) <> 0;
+
+select w.id from wallet w left join ledger_entry l on l.account_id = w.id
+group by w.id, w.balance
+having w.balance <> coalesce(sum(case when l.entry_type='CREDIT' then l.amount else -l.amount end),0);
+```
+
+## Idempotency
+
+The response is saved in the same transaction as the action. Same key and body
+-> stored response. Same key, other body -> 409. Two at once with the same key ->
+the loser hits the primary key, rolls back fully, then replays the winner.
+Failed requests are not saved, so a corrected retry works.
+
+## Threads and connections
+
+| | | |
+|---|---|---|
+| Tomcat threads | 24 | never wait on the bank |
+| bank threads | 8 | the only ones that call the bank |
+| Hikari pool | 32 | 24 + 8, no thread ever waits for a connection |
+| bank read timeout | 8 s | above the bank's 6 s slow path |
+| payout lease | 30 s | longer than connect + read timeout |
+
+## Bank rules
+
+- Never pay twice: one payout_id per payout, the bank is idempotent on it.
+- Never pay something I called FAILED: FAILED only comes from the bank's own answer.
+  A timeout is retried, never failed.
+- Callbacks twice, out of order, or before my submit returns: event dedup plus the
+  payout row lock. First answer wins, a different later one sets `conflict`.
+
+## Bank mock
+
+The real bank isn't available, so I wrote `../external-bank` to behave like its
+spec: accept or reject on submit, 1 to 3 s status latency, callbacks after 1 to
+10 s to either instance, 30% duplicated, retried when no 2xx in 2 s, about 5%
+failures. All of it is configurable so a scenario can force duplicates or make a
+target unreachable. I used it to run the full spec, 60 parallel transfers with a
+freeze in the middle, and a payout accepted on an instance I then killed.
+
+## Decisions
+
+1. Row locks, not optimistic versioning. Contention is the whole problem.
+2. Freeze is a locked update. No flags, no cache.
+3. Reserve on accept, capture on success, release on failure.
+4. Worker on every instance with SKIP LOCKED and a lease. No leader.
+5. Bank calls only from the bounded pool.
+6. Timeout is never FAILED.
+7. Callback dedup by primary key on event_id.
+8. Idempotency saved with the action, in one transaction.
+9. Double entry ledger with system accounts.
+10. Amounts are whole numbers in BIGINT.
+11. Wallets are seeded by migration. There is no create endpoint in the spec.
+12. `conflict` = a later bank answer disagreed with the stored final status.
+13. Error body is `{"error": CODE, "message": text}`.
+14. Timestamps are cut to milliseconds at the source (`Now.instant()`). Java gives
+    nanos and Postgres keeps micros, so without this a PUT and a later GET would show
+    different digits for the same moment. Millis also matches the spec examples.
+
+## Running
+
+```
+mvn spring-boot:run                                              # db + instance 1
+mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8081   # instance 2
+cd ../external-bank && mvn spring-boot:run                       # bank mock on 9090
+mvn test                                                         # needs Docker
+```
+
+Testcontainers is pinned to 1.21.4 in the pom: the version Boot 3.5.6 manages uses
+Docker API 1.32, which Docker Engine 29 refuses. If the default Docker context is not
+the running daemon, set `DOCKER_HOST` before `mvn test`.
+
+Swagger is at `/swagger-ui.html`. Tests use Testcontainers and cover: parallel
+transfers keep the total, freeze blocks later debits, same key runs once, reversal
+runs once, three copies of a callback finish once, a lease expires and the row is
+claimed again, and the payout flow against a stubbed bank.
+
+## Not done
+
+- Disbursement
+- Statement

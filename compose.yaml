@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: safari-postgres
+    environment:
+      POSTGRES_DB: safari
+      POSTGRES_USER: safari
+      POSTGRES_PASSWORD: safari
+    ports:
+      - "${POSTGRES_PORT:-54552}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safari -d safari"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

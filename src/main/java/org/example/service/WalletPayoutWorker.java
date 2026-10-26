@@ -2,34 +2,72 @@ package org.example.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.config.BankProperties;
 import org.example.domain.WalletPayout;
 import org.example.domain.WalletPayoutState;
 import org.example.domain.WalletPayoutStatus;
 import org.example.service.BankClient.SubmitResult;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 
-// Runs on every instance. Rows are claimed with "for update skip locked", so a payout accepted by
-// an instance that died is simply picked up by another one.
+import java.util.concurrent.Semaphore;
+
+// Runs on every instance. Each tick claims at most as many payouts as there are free bank threads,
+// so a claimed row is always being worked on and never waits in a queue past its claim time.
+// Rows are claimed with "for update skip locked", so a payout accepted by an instance that died
+// is picked up by another one.
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class WalletPayoutWorker {
 
     private final WalletPayoutService payouts;
     private final BankClient bank;
+    private final ThreadPoolTaskExecutor bankExecutor;
+    private final Semaphore freeSlots;
+
+    public WalletPayoutWorker(WalletPayoutService payouts, BankClient bank, ThreadPoolTaskExecutor bankExecutor,
+                              BankProperties props) {
+        this.payouts = payouts;
+        this.bank = bank;
+        this.bankExecutor = bankExecutor;
+        this.freeSlots = new Semaphore(props.workerThreads());
+    }
 
     @Scheduled(fixedDelayString = "${bank.worker-interval}")
-    public void run() {
+    public void tick() {
         try {
-            for (WalletPayout p : payouts.claimDue(WalletPayoutState.ACCEPTED)) {
-                submit(p);
-            }
-            for (WalletPayout p : payouts.claimDue(WalletPayoutState.SUBMITTED)) {
-                poll(p);
-            }
+            dispatch(WalletPayoutState.ACCEPTED);
+            dispatch(WalletPayoutState.SUBMITTED);
         } catch (Exception e) {
-            log.error("payout worker failed: {}", e.getMessage(), e);
+            log.error("payout worker tick failed: {}", e.getMessage(), e);
+        }
+    }
+
+    private void dispatch(WalletPayoutState state) {
+        int free = freeSlots.availablePermits();
+        if (free == 0) {
+            return;
+        }
+        for (WalletPayout p : payouts.claimDue(state, free)) {
+            if (!freeSlots.tryAcquire()) {
+                payouts.retryLater(p.getId());   // lost the slot to the other dispatch, let it go
+                continue;
+            }
+            bankExecutor.execute(() -> {
+                try {
+                    if (state == WalletPayoutState.ACCEPTED) {
+                        submit(p);
+                    } else {
+                        poll(p);
+                    }
+                } catch (Exception e) {
+                    log.error("payout {} step failed: {}", p.getId(), e.getMessage(), e);
+                    payouts.retryLater(p.getId());
+                } finally {
+                    freeSlots.release();
+                }
+            });
         }
     }
 

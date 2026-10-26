@@ -24,8 +24,6 @@ import java.util.List;
 @RequiredArgsConstructor
 public class WalletPayoutService {
 
-    private static final Duration LOCK_TIME = Duration.ofSeconds(30);
-
     private final WalletPayoutRepository payouts;
     private final BankEventRepository bankEvents;
     private final WalletService wallets;
@@ -56,10 +54,11 @@ public class WalletPayoutService {
 
     // -- worker steps, each its own transaction -------------------------------
 
+    // claim time must cover the slowest bank call (connect + read timeout) with margin
     @Transactional
-    public List<WalletPayout> claimDue(WalletPayoutState state) {
-        List<WalletPayout> due = payouts.findDueForUpdate(state.name(), props.batchSize());
-        Instant until = Instant.now().plus(LOCK_TIME);
+    public List<WalletPayout> claimDue(WalletPayoutState state, int limit) {
+        List<WalletPayout> due = payouts.findDueForUpdate(state.name(), limit);
+        Instant until = Instant.now().plus(props.claimTime());
         due.forEach(p -> p.lock(until));
         return due;
     }

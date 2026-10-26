@@ -9,7 +9,9 @@ public record BankProperties(
         String baseUrl,
         Duration connectTimeout,
         Duration readTimeout,
+        int workerThreads,
+        Duration workerInterval,
         Duration pollInterval,
         Duration retryInterval,
-        int batchSize) {
+        Duration claimTime) {
 }

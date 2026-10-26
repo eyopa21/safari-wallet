@@ -1,5 +1,6 @@
 package org.example.service;
 
+import org.example.domain.Now;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.api.ApiException;
@@ -37,7 +38,7 @@ public class WalletPayoutService {
         WalletService.requireActive(wallet);
         WalletService.requireAvailable(wallet, amount);
         wallet.reserve(amount);
-        return payouts.save(new WalletPayout(Ids.next("P"), walletId, bankAccount, amount, Instant.now()));
+        return payouts.save(new WalletPayout(Ids.next("P"), walletId, bankAccount, amount, Now.instant()));
     }
 
     @Transactional(readOnly = true)
@@ -49,7 +50,7 @@ public class WalletPayoutService {
     // one row per event_id: returns false for a duplicate (concurrent copies hit the primary key)
     @Transactional
     public void recordBankEvent(String eventId, String payoutId, String status) {
-        bankEvents.save(new BankEvent(eventId, payoutId, status, Instant.now()));
+        bankEvents.save(new BankEvent(eventId, payoutId, status, Now.instant()));
     }
 
     // -- worker steps, each its own transaction -------------------------------
@@ -58,7 +59,7 @@ public class WalletPayoutService {
     @Transactional
     public List<WalletPayout> claimDue(WalletPayoutState state, int limit) {
         List<WalletPayout> due = payouts.findDueForUpdate(state.name(), limit);
-        Instant until = Instant.now().plus(props.claimTime());
+        Instant until = Now.instant().plus(props.claimTime());
         due.forEach(p -> p.lock(until));
         return due;
     }
@@ -66,18 +67,18 @@ public class WalletPayoutService {
     @Transactional
     public void submitted(String id, String bankRef) {
         payouts.lockById(id).filter(p -> !p.isDone())
-                .ifPresent(p -> p.submitted(bankRef, Instant.now(), props.pollInterval()));
+                .ifPresent(p -> p.submitted(bankRef, Now.instant(), props.pollInterval()));
     }
 
     @Transactional
     public void retryLater(String id) {
         payouts.lockById(id).filter(p -> !p.isDone())
-                .ifPresent(p -> p.retryLater(Instant.now(), backoff(p.getAttempts())));
+                .ifPresent(p -> p.retryLater(Now.instant(), backoff(p.getAttempts())));
     }
 
     @Transactional
     public void resubmit(String id) {
-        payouts.lockById(id).filter(p -> !p.isDone()).ifPresent(p -> p.resubmit(Instant.now()));
+        payouts.lockById(id).filter(p -> !p.isDone()).ifPresent(p -> p.resubmit(Now.instant()));
     }
 
     // the only place money leaves the wallet or the reservation is released
@@ -88,7 +89,7 @@ public class WalletPayoutService {
             log.warn("{}: payout {} unknown", source, id);
             return;
         }
-        Instant now = Instant.now();
+        Instant now = Now.instant();
         if (payout.isDone()) {
             if (payout.getStatus() != finalStatus) {
                 log.error("{}: payout {} already {} but bank now says {}", source, id, payout.getStatus(), finalStatus);

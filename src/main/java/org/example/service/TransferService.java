@@ -1,5 +1,6 @@
 package org.example.service;
 
+import org.example.domain.Now;
 import lombok.RequiredArgsConstructor;
 import org.example.api.ApiException;
 import org.example.api.ErrorCode;
@@ -36,7 +37,7 @@ public class TransferService {
         WalletService.requireActive(target);
         WalletService.requireAvailable(source, amount);
 
-        Transfer transfer = transfers.save(new Transfer(Ids.next("T"), from, to, amount, reference, Instant.now()));
+        Transfer transfer = transfers.save(new Transfer(Ids.next("T"), from, to, amount, reference, Now.instant()));
         ledger.post(source, target, amount, Source.TRANSFER, transfer.getId());
         return new TransferResponse(transfer.getId(), transfer.getStatus(), source.available(), transfer.getCreatedAt());
     }
@@ -62,7 +63,7 @@ public class TransferService {
         WalletService.requireAvailable(source, transfer.getAmount());
         // target may be FROZEN: money coming back is always accepted
 
-        transfer.reverse(Ids.next("R"), reason, Instant.now());
+        transfer.reverse(Ids.next("R"), reason, Now.instant());
         ledger.post(source, target, transfer.getAmount(), Source.REVERSAL, transfer.getReversalId());
         return transfer;
     }

@@ -6,6 +6,8 @@ import org.example.service.BankClient.SubmitResult;
 import org.example.service.WalletPayoutService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.client.ResourceAccessException;
 
@@ -18,7 +20,10 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
-// the worker runs for real; only the HTTP client to the bank is stubbed
+// the worker runs for real; only the HTTP client to the bank is stubbed.
+// the context is dropped afterwards so this worker cannot touch rows of other test classes
+@TestPropertySource(properties = "bank.worker-enabled=true")
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PayoutFlowTest extends IntegrationTest {
 
     @Autowired

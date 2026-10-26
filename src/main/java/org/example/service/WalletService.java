@@ -1,5 +1,6 @@
 package org.example.service;
 
+import org.example.domain.Now;
 import lombok.RequiredArgsConstructor;
 import org.example.api.ApiException;
 import org.example.api.ErrorCode;
@@ -10,6 +11,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @Service
 @RequiredArgsConstructor
@@ -26,7 +28,8 @@ public class WalletService {
     @Transactional
     public Wallet changeStatus(String id, WalletStatus status, String reason) {
         Wallet wallet = lock(id);
-        wallet.changeStatus(status, reason, Instant.now());
+        // postgres keeps microseconds; truncate so the response equals what a later read returns
+        wallet.changeStatus(status, reason, Now.instant().truncatedTo(ChronoUnit.MICROS));
         return wallet;
     }
 

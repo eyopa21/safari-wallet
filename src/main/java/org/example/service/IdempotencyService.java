@@ -1,5 +1,6 @@
 package org.example.service;
 
+import org.example.domain.Now;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -41,7 +42,7 @@ public class IdempotencyService {
         try {
             String body = tx.execute(s -> {
                 String b = toJson(action.get());
-                records.save(new IdempotencyRecord(key, endpoint, hash, status.value(), b, Instant.now()));
+                records.save(new IdempotencyRecord(key, endpoint, hash, status.value(), b, Now.instant()));
                 return b;
             });
             return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(body);

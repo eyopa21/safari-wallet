@@ -7,6 +7,7 @@ import org.example.domain.WalletPayout;
 import org.example.domain.WalletPayoutState;
 import org.example.domain.WalletPayoutStatus;
 import org.example.service.BankClient.SubmitResult;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
@@ -19,6 +20,7 @@ import java.util.concurrent.Semaphore;
 // is picked up by another one.
 @Component
 @Slf4j
+@ConditionalOnProperty(name = "bank.worker-enabled", havingValue = "true", matchIfMissing = true)
 public class WalletPayoutWorker {
 
     private final WalletPayoutService payouts;

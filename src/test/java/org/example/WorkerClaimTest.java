@@ -5,14 +5,12 @@ import org.example.domain.WalletPayoutState;
 import org.example.service.WalletPayoutService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.test.context.TestPropertySource;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-// the background worker is effectively off here (one run at startup, then never), so claims are ours alone
-@TestPropertySource(properties = "bank.worker-interval=3600s")
+// the background worker is off in tests, so claims here are mine alone
 class WorkerClaimTest extends IntegrationTest {
 
     @Autowired

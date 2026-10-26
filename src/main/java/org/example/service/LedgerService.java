@@ -1,5 +1,6 @@
 package org.example.service;
 
+import org.example.domain.Now;
 import lombok.RequiredArgsConstructor;
 import org.example.domain.LedgerEntry;
 import org.example.domain.LedgerEntry.Source;
@@ -24,7 +25,7 @@ public class LedgerService {
 
     // wallet to wallet: transfers and reversals
     public void post(Wallet from, Wallet to, long amount, Source source, String sourceId) {
-        Instant now = Instant.now();
+        Instant now = Now.instant();
         from.debit(amount);
         to.credit(amount);
         entries.save(LedgerEntry.wallet(from, Type.DEBIT, amount, source, sourceId, now));
@@ -33,7 +34,7 @@ public class LedgerService {
 
     // payout succeeded: the reserved money leaves the wallet for the bank
     public void postPayout(Wallet wallet, long amount, String payoutId) {
-        Instant now = Instant.now();
+        Instant now = Now.instant();
         wallet.capture(amount);
         entries.save(LedgerEntry.wallet(wallet, Type.DEBIT, amount, Source.PAYOUT, payoutId, now));
         entries.save(LedgerEntry.system(LedgerEntry.BANK_ACCOUNT, Type.CREDIT, amount, Source.PAYOUT, payoutId, now));

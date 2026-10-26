@@ -17,10 +17,11 @@ import java.util.concurrent.Future;
 import static org.assertj.core.api.Assertions.assertThat;
 
 // One Postgres for the whole test run; every test class gets the real schema from Liquibase.
-@SpringBootTest(properties = {
+@SpringBootTest(classes = Main.class, properties = {
         "spring.docker.compose.enabled=false",
         "spring.liquibase.contexts=test",      // no seeded wallets, tests make their own
         "bank.base-url=http://localhost:1",    // nothing listens here: the worker's bank calls fail fast
+        "bank.worker-enabled=false",           // each test drives the service directly; PayoutFlowTest turns the worker on
         "bank.worker-interval=200ms",
         "bank.poll-interval=200ms",
         "bank.retry-interval=200ms",

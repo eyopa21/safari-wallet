@@ -29,6 +29,7 @@ public class WalletPayoutService {
     private final WalletPayoutRepository payouts;
     private final BankEventRepository bankEvents;
     private final WalletService wallets;
+    private final LedgerService ledger;
     private final BankProperties props;
 
     // reserve the money and answer; the worker talks to the bank
@@ -98,7 +99,7 @@ public class WalletPayoutService {
         }
         Wallet wallet = wallets.lock(payout.getWalletId());
         if (finalStatus == WalletPayoutStatus.SUCCEEDED) {
-            wallet.capture(payout.getAmount());
+            ledger.postPayout(wallet, payout.getAmount(), payout.getId());
         } else {
             wallet.release(payout.getAmount());
         }
